@@ -45,7 +45,7 @@
 }
 *{box-sizing:border-box}
 [hidden]{display:none!important}
-html{scroll-behavior:smooth;scroll-padding-top:16px}
+html{scroll-behavior:smooth;scroll-padding-top:16px;interpolate-size:allow-keywords}
 body{margin:0;background:var(--bg);color:var(--ink);font:400 18px/1.55 var(--f);-webkit-text-size-adjust:100%;font-variant-numeric:tabular-nums}
 a{color:var(--pri);text-underline-offset:3px;text-decoration-thickness:1px}
 a:hover{text-decoration-thickness:2px}
@@ -96,8 +96,8 @@ h3{font-weight:650;font-size:22px;line-height:1.25;margin:0 0 8px}
 .ctl2 .btn{font-size:15px;min-height:40px;padding:10px 16px}
 
 /* Harita */
-.mapbox{position:relative;margin:4px 0 8px}
-#map{display:block;width:100%;height:auto;max-height:min(54svh,640px);touch-action:manipulation}
+.mapbox{position:relative;margin:4px 0 8px;overflow:hidden;border-radius:12px}
+#map{display:block;width:100%;height:auto;max-height:min(54svh,640px);touch-action:manipulation;transform-origin:0 0}
 #ymark{position:absolute;left:4px;bottom:0;margin:0;font:800 clamp(48px,9vw,132px)/1 var(--f);font-stretch:75%;color:var(--ink);opacity:.08;pointer-events:none}
 .prov{fill:var(--prov);stroke:var(--sea);stroke-width:1;vector-effect:non-scaling-stroke;transition:fill .5s ease var(--d,0ms);cursor:default}
 .prov:hover{fill:var(--prov-hover)}
@@ -117,6 +117,7 @@ h3{font-weight:650;font-size:22px;line-height:1.25;margin:0 0 8px}
 .mk.sel .selring{opacity:1}
 .mk .lab{font:650 22px var(--f);fill:var(--ink);paint-order:stroke;stroke:var(--sea);stroke-width:6px;stroke-linejoin:round;text-anchor:middle;opacity:0;transition:opacity .2s;pointer-events:none}
 .mk:hover .lab,.mk.sel .lab,.mk:focus-visible .lab{opacity:1}
+.idle .mk .ring{animation-play-state:paused}
 @keyframes ping{0%{transform:scale(1);opacity:.7}80%,100%{transform:scale(2.8);opacity:0}}
 
 .ctl{display:flex;align-items:center;gap:20px}
@@ -136,7 +137,7 @@ h3{font-weight:650;font-size:22px;line-height:1.25;margin:0 0 8px}
 .chip[aria-pressed="true"] span{color:var(--bg);opacity:.8}
 .chip.off{opacity:.45}
 
-.detail{background:var(--panel);border-radius:24px;padding:28px clamp(20px,2.4vw,36px)}
+.detail{background:var(--panel);border-radius:24px;padding:28px clamp(20px,2.4vw,36px);overflow:hidden}
 .d-top{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;font-size:15px;color:var(--dim);margin-bottom:12px}
 .d-top .when{color:var(--ink);font-weight:600}
 .detail h3{font-size:clamp(22px,2vw,28px);font-weight:700;font-stretch:90%}
@@ -203,6 +204,8 @@ h3{font-weight:650;font-size:22px;line-height:1.25;margin:0 0 8px}
 .tl-h{font-weight:650;font-size:19px;line-height:1.3}
 .tl-i summary::after{content:"+";font-weight:500;font-size:24px;line-height:1;color:var(--pri);transition:transform .2s}
 .tl-i[open] summary::after{transform:rotate(45deg)}
+.tl-i::details-content{height:0;overflow:clip;transition:height .35s cubic-bezier(.2,.7,.2,1),content-visibility .35s allow-discrete}
+.tl-i[open]::details-content{height:auto}
 .tl-b{padding:0 22px 20px calc(22px + 5.5em + 16px)}
 .tl-b p{margin:0 0 8px;max-width:66ch}
 .tl-b .src{font-size:15px;color:var(--dim)}
@@ -276,6 +279,7 @@ td.src{font-size:15px;max-width:30ch}
 @media (prefers-reduced-motion:reduce){
   html{scroll-behavior:auto}
   .mk .ring{animation:none}
+  .tl-i::details-content{transition:none}
   *{transition-duration:.01ms!important}
 }
 </style>
@@ -604,7 +608,6 @@ const svg = $("#map");
 const VBW = GEO.viewBox[2], VBH = GEO.viewBox[3];
 const FULL = {x:0, y:0, w:VBW, h:VBH};
 let vb = Object.assign({}, FULL);
-let flyRaf = 0;
 
 function setVB(v) {
   vb = v;
@@ -612,16 +615,35 @@ function setVB(v) {
   svg.style.setProperty("--k", Math.pow(v.w / VBW, 0.5).toFixed(3));
   $("#reset").hidden = v.w > VBW - 1;
 }
+/* viewBox'ı her karede değiştirmek tüm SVG'yi yeniden çizer; uçuş CSS transform ile
+   yapılır, viewBox sonda bir kez güncellenir. */
+const FLY_EASE = "cubic-bezier(.65,0,.35,1)";
+let flyAnim = null, flyFrom = null, flyT = null;
+function fitOf(v) {
+  const W = svg.clientWidth, H = svg.clientHeight, c = Math.min(W / v.w, H / v.h);
+  return {c, ox: (W - v.w * c) / 2, oy: (H - v.h * c) / 2};
+}
+function flyMatrix(from, to) {
+  const a = fitOf(from), b = fitOf(to), k = b.c / a.c;
+  return {a, k, tx: b.ox - to.x * b.c - k * (a.ox - from.x * a.c), ty: b.oy - to.y * b.c - k * (a.oy - from.y * a.c)};
+}
+/* Yarıda kesilen uçuşun o anda ekranda görünen bölgesi */
+function flyCurrent() {
+  const e = flyAnim.effect.getComputedTiming().progress || 0, m = flyMatrix(flyFrom, flyT);
+  const s = 1 + (m.k - 1) * e, c = m.a.c * s;
+  return {x: flyFrom.x + (m.a.ox - m.tx * e - s * m.a.ox) / c, y: flyFrom.y + (m.a.oy - m.ty * e - s * m.a.oy) / c,
+          w: flyFrom.w / s, h: flyFrom.h / s};
+}
 function flyTo(target, ms) {
-  cancelAnimationFrame(flyRaf);
-  if (REDUCED) { setVB(target); return; }
-  const from = Object.assign({}, vb), t0 = performance.now(), dur = ms || 650;
-  (function step(now) {
-    const p = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - p, 3);
-    setVB({x: from.x + (target.x - from.x) * e, y: from.y + (target.y - from.y) * e,
-           w: from.w + (target.w - from.w) * e, h: from.h + (target.h - from.h) * e});
-    if (p < 1) flyRaf = requestAnimationFrame(step);
-  })(t0);
+  if (flyAnim) { const v = flyCurrent(); flyAnim.cancel(); flyAnim = null; setVB(v); }
+  if (REDUCED || !svg.animate || !svg.clientWidth) { setVB(target); return; }
+  const dur = ms || 800, m = flyMatrix(vb, target);
+  flyFrom = Object.assign({}, vb); flyT = target;
+  /* İşaretçi boyu başta bir kez ayarlanır; her karede değişirse SVG baştan çizilir */
+  svg.style.setProperty("--k", Math.pow(target.w / VBW, 0.5).toFixed(3));
+  const a = flyAnim = svg.animate([{transform: "none"}, {transform: `translate(${m.tx}px, ${m.ty}px) scale(${m.k})`}],
+                                  {duration: dur, easing: FLY_EASE, fill: "forwards"});
+  a.onfinish = () => { if (flyAnim !== a) return; setVB(target); a.cancel(); flyAnim = null; };
 }
 function targetFor(c) {
   const w = window.innerWidth < 640 ? 380 : 460, h = w * VBH / VBW;
@@ -688,14 +710,20 @@ POINTS.forEach((pt, i) => pop(pt, 700 + i * 140));
 
 /* ---------- Seçim ve ayrıntı kartı ---------- */
 let curId = null;
-function renderDetail(pt) {
-  const d = $("#detail");
+function renderDetail(pt, animate) {
+  const d = $("#detail"), h0 = d.offsetHeight;
   d.innerHTML =
     `<div class="d-top"><i class="dot c-${pt.cat}"></i><span>${esc(CATS[pt.cat])}</span><span class="when">${esc(pt.when)}</span></div>` +
     `<h3>${esc(pt.name)}: ${esc(pt.head)}</h3><p>${esc(pt.body)}</p>` +
     `<dl class="facts">${pt.facts.map(f => `<div><dt>${esc(f[0])}</dt><dd>${esc(f[1])}</dd></div>`).join("")}</dl>` +
     `<p class="d-src">Kaynak: ${srcLinks(pt.src)}</p>`;
-  anim(d, [{opacity: 0, transform: "translateY(8px)"}, {opacity: 1, transform: "none"}], {duration: 350, easing: "ease-out"});
+  const r = d.getBoundingClientRect();
+  if (!animate || r.bottom < 0 || r.top > innerHeight) return;
+  /* Yükseklik yumuşak değişsin ki alttaki bölümler zıplamasın */
+  const h1 = d.offsetHeight;
+  if (h0 !== h1) anim(d, [{height: h0 + "px"}, {height: h1 + "px"}], {duration: 360, easing: EASE});
+  Array.from(d.children).forEach((c, i) => anim(c, [{opacity: 0, transform: "translateY(10px)"}, {opacity: 1, transform: "none"}],
+    {duration: 360, delay: 40 + i * 45, easing: EASE, fill: "backwards"}));
 }
 function select(id, fly) {
   const pt = POINTS.find(p => p.id === id); if (!pt) return;
@@ -706,20 +734,21 @@ function select(id, fly) {
     m.g.classList.toggle("sel", p.id === id);
     provById[p.id].path.classList.toggle("sel", p.id === id);
   });
-  $$(".chip").forEach(c => c.setAttribute("aria-pressed", c.getAttribute("data-id") === id ? "true" : "false"));
+  POINTS.forEach(p => chipById[p.id].setAttribute("aria-pressed", p.id === id ? "true" : "false"));
   const sp = provById[id].path; gProv.appendChild(sp);   /* seçili il en üstte çizilsin */
-  renderDetail(pt);
+  renderDetail(pt, fly);
   if (fly && !playing) flyTo(targetFor(pt));
 }
 
 /* Çipler */
-const chipsEl = $("#chips");
+const chipsEl = $("#chips"), chipById = {};
 POINTS.forEach(pt => {
   const b = document.createElement("button");
   b.type = "button"; b.className = "chip"; b.setAttribute("data-id", pt.id); b.setAttribute("aria-pressed", "false");
   b.innerHTML = `<i class="dot c-${pt.cat}"></i><b>${esc(pt.name)}</b><span>${Math.floor(pt.t)}</span>`;
   b.addEventListener("click", () => select(pt.id, true));
   chipsEl.appendChild(b);
+  chipById[pt.id] = b;
 });
 
 /* ---------- Zaman kaydırıcısı ve oynatıcı ---------- */
@@ -727,30 +756,30 @@ const MIN = 2014, MAX = 2026.49;
 const ANCH = [[0, 2014], [0.08, 2014.75], [0.28, 2018.3], [0.40, 2020.74], [0.60, 2025.87], [0.68, 2026.10], [0.72, 2026.14], [0.82, 2026.36], [0.92, 2026.48], [1, 2026.49]];
 const yearAt = p => { for (let i = 1; i < ANCH.length; i++) if (p <= ANCH[i][0]) { const a = ANCH[i - 1], b = ANCH[i]; return a[1] + (b[1] - a[1]) * ((p - a[0]) / (b[0] - a[0])); } return MAX; };
 let cur = MAX, playing = false, raf = 0;
-const slider = $("#yr");
+const slider = $("#yr"), yrlab = $("#yrlab"), ymark = $("#ymark"), capEl = $("#cap");
+/* Oynatma her karede çağırır; yalnızca değişen metin DOM'a yazılır */
+const setText = (n, t) => { if (n.textContent !== t) n.textContent = t; };
 
 function setYear(y, silent) {
   cur = y;
   slider.value = y;
-  $("#yrlab").textContent = ym(y);
-  $("#ymark").textContent = String(Math.floor(y + 1e-9));
-  let latest = null;
+  setText(yrlab, ym(y));
+  setText(ymark, String(Math.floor(y + 1e-9)));
+  let latest = null, n = 0;
   POINTS.forEach(pt => {
     const on = pt.t <= y + 1e-6;
-    const m = mkById[pt.id];
     if (on !== pt.on) {
       pt.on = on;
-      m.g.classList.toggle("off", !on);
+      mkById[pt.id].g.classList.toggle("off", !on);
       provById[pt.id].path.classList.toggle("lit-" + pt.cat, on);
+      chipById[pt.id].classList.toggle("off", !on);
       if (on && !silent) pop(pt, 0);
     }
-    if (on && (!latest || pt.t > latest.t)) latest = pt;
+    if (on) { n++; if (!latest || pt.t > latest.t) latest = pt; }
   });
-  $$(".chip").forEach(c => c.classList.toggle("off", !POINTS.find(p => p.id === c.getAttribute("data-id")).on));
-  const n = POINTS.filter(p => p.on).length;
-  $("#cap").textContent = (y >= MAX - 0.001 && !playing)
+  setText(capEl, (y >= MAX - 0.001 && !playing)
     ? `${n} il gösteriliyor, veriler Haziran 2026'ya kadar. 2014'ten bugüne yayılışı görmek için "Yayılımı izle"ye basın.`
-    : latest ? `${latest.when} · ${latest.name}: ${latest.head}` : "Bu tarihten önce belgelenmiş kayıt yok.";
+    : latest ? `${latest.when} · ${latest.name}: ${latest.head}` : "Bu tarihten önce belgelenmiş kayıt yok.");
 }
 function setPlayUI(p) {
   $("#ico-play").hidden = p; $("#ico-pause").hidden = !p;
@@ -782,6 +811,15 @@ $("#cov").addEventListener("click", e => {
 
 setYear(MAX, true);
 select("istanbul", false);
+
+/* Ekran dışındayken nabız halkaları SVG'yi boşuna her karede yeniden çizdirmesin */
+if ("IntersectionObserver" in window) {
+  new IntersectionObserver(([en]) => svg.classList.toggle("idle", !en.isIntersecting)).observe(svg);
+}
+
+[$(".intro h1"), $(".intro .lede"), $(".stage")].forEach((n, i) =>
+  anim(n, [{opacity: 0, transform: "translateY(24px)"}, {opacity: 1, transform: "none"}],
+       {duration: 700, delay: i * 90, easing: EASE, fill: "backwards"}));
 
 /* ---------- Bölümler: çubuklar, kronoloji, teknik liste, tablo, kaynaklar ---------- */
 const MAXV = 160000;
